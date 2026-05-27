@@ -4,7 +4,7 @@ info:
   version: "1.0.0"
   description: "Enterprise knowledge assistant for document-based Q&A using RAG (Retrieval Augmented Generation). Upload documents and query them using natural language."
 servers:
-  - url: "https://py-agent-knowledgeassistant-2.onrender.com"
+  - url: "https://py-agent-knowledgeassistant-8bby.onrender.com"
 paths:
   /execute:
     post:
