@@ -93,6 +93,13 @@ class HealthResponse(BaseModel):
     status: str
     message: str
 
+class ExecuteRequest(BaseModel):
+    query: str
+    limit: Optional[int] = None
+
+class ExecuteResponse(BaseModel):
+    result: dict  # Dynamic output payload as per their spec
+
 # Exception handler for validation errors
 @app.exception_handler(ValueError)
 async def value_error_handler(request, exc):
@@ -259,6 +266,101 @@ async def upload_document(file: UploadFile = File(...)):
         return {"status": "success", "filename": file.filename, "chunks_indexed": vector_count}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
+
+@app.post("/execute")
+async def execute_agent(request: ExecuteRequest):
+    """
+    Trigger Agent Node Action - Marketplace compatible endpoint
+    """
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        
+        # Get query embedding
+        response = client.embeddings.create(
+            input=request.query,
+            model="text-embedding-3-small"
+        )
+        query_vec = response.data[0].embedding
+        
+        # Query Pinecone with metadata
+        index = get_index()
+        top_k = request.limit if request.limit else 5
+        results = index.query(
+            vector=query_vec,
+            top_k=top_k,
+            include_metadata=True
+        )
+        
+        # Check if we have results
+        if not results.get("matches") or len(results["matches"]) == 0:
+            return {
+                "status": "error",
+                "message": "No information found in knowledge base for this query",
+                "answer": "I don't have information about this topic in my knowledge base.",
+                "sources": []
+            }
+        
+        # Extract sources
+        sources = []
+        seen_docs = set()
+        
+        for match in results["matches"]:
+            metadata = match.get("metadata", {})
+            doc_name = metadata.get("source", "Unknown")
+            page_num = metadata.get("page")
+            score = match.get("score", 0.0)
+            
+            doc_key = f"{doc_name}_{page_num}"
+            if doc_key not in seen_docs:
+                seen_docs.add(doc_key)
+                sources.append({
+                    "document": doc_name,
+                    "page": page_num,
+                    "relevance_score": round(score, 4)
+                })
+        
+        # Get context chunks for agent
+        context_chunks = [match["metadata"]["text"] for match in results["matches"]]
+        context = "\n".join(context_chunks)
+        top_score = results["matches"][0].get("score", 0.0)
+        
+        # Invoke the agent
+        result = graph.invoke({
+            "question": request.query,
+            "context": context,
+            "answer": ""
+        })
+        
+        answer = result["answer"]
+        
+        # Calculate answer confidence
+        answer_confidence = simple_answer_confidence(
+            answer=answer,
+            retrieved_chunks=context_chunks,
+            retrieval_score=top_score
+        )
+        
+        # Return dynamic output payload matching their spec
+        return {
+            "status": "success",
+            "answer": answer,
+            "confidence_score": answer_confidence["confidence_score"],
+            "confidence_category": answer_confidence["category"],
+            "is_from_documents": answer_confidence["is_from_documents"],
+            "sources": sources[:3],
+            "metadata": {
+                "explanation": answer_confidence["explanation"],
+                "total_chunks_retrieved": len(context_chunks)
+            }
+        }
+    
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+            "answer": "An error occurred while processing your request.",
+            "sources": []
+        }
 
 
 # Run the application
